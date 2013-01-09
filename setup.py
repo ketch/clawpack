@@ -11,6 +11,8 @@ import warnings
 import subprocess
 import shutil
 import re
+from Cython.Distutils import build_ext
+from os.path import join as pjoin, dirname
 
 if sys.version_info[0] < 3:
     import __builtin__ as builtins
@@ -140,6 +142,11 @@ def setup_package():
 
     write_version_py()
 
+    if found_cuda:  
+        setup_build_ext = cuda_build_ext
+    else:
+        setup_build_ext = build_ext
+
     setup_dict = dict(
         name = 'clawpack',
         maintainer = "Clawpack Developers",
@@ -151,6 +158,7 @@ def setup_package():
         license = 'BSD',
         classifiers=[_f for _f in CLASSIFIERS.split('\n') if _f],
         platforms = ["Linux", "Solaris", "Mac OS-X", "Unix"],
+        cmdclass = {'build_ext': setup_build_ext}
         )
 
     try:
@@ -203,6 +211,9 @@ def setup_package():
             if not os.path.exists('clawpack/peanoclaw'):
                 os.symlink(os.path.abspath('pyclaw/src/peanoclaw'),
                            'clawpack/peanoclaw')
+            if not os.path.exists('clawpack/cudaclaw') and found_cuda:
+                os.symlink(os.path.abspath('pyclaw/src/cudaclaw'),
+                           'clawpack/cudaclaw')
 
             from numpy.distutils.core import setup
             setup(configuration=configuration,
@@ -218,5 +229,168 @@ def setup_package():
         os.chdir(old_path)
     return
 
+def patch_numpy_to_use_cython():
+    # from https://github.com/matthew-brett/du-cy-numpy/blob/master/matthew_monkey.py
+    from distutils.dep_util import newer_group
+    from distutils.errors import DistutilsError
+
+    from numpy.distutils.misc_util import appendpath
+    from numpy.distutils import log
+
+    # Note we are hard-coding to .cpp here!
+
+    def generate_a_pyrex_source(self, base, ext_name, source, extension):
+        ''' Monkey patch for numpy build_src.build_src method
+    
+        Uses Cython instead of Pyrex.
+    
+        Assumes Cython is present
+        '''
+        if self.inplace:
+            target_dir = dirname(base)
+        else:
+            target_dir = appendpath(self.build_src, dirname(base))
+        target_file = pjoin(target_dir, ext_name + '.cpp')
+        depends = [source] + extension.depends
+        if self.force or newer_group(depends, target_file, 'newer'):
+            import Cython.Compiler.Main
+            log.info("cythonc:> %s" % (target_file))
+            self.mkpath(target_dir)
+            options = Cython.Compiler.Main.CompilationOptions(
+                defaults=Cython.Compiler.Main.default_options,
+                include_path=extension.include_dirs,
+                output_file=target_file)
+            cython_result = Cython.Compiler.Main.compile(source,
+                                                       options=options)
+            if cython_result.num_errors != 0:
+                raise DistutilsError("%d errors while compiling %r with Cython" \
+                      % (cython_result.num_errors, source))
+        return target_file
+    
+    
+    from numpy.distutils.command import build_src
+    build_src.build_src.generate_a_pyrex_source = generate_a_pyrex_source
+
+def customize_cython_for_nvcc(self):
+    """decorates Cython build_ext class to handle .cu source files
+
+    adapted from http://stackoverflow.com/a/13300714/122022
+    by Robert McGibbon (used under StackOverflow CC-BY license)
+
+    If you subclass UnixCCompiler, it's not trivial to get your subclass
+    injected in, and still have the right customizations (i.e.
+    distutils.sysconfig.customize_compiler) run on it. Instead, we take 
+    advantage of Python's dynamism to over-ride the class function directly
+    """
+
+    def locate_cuda():
+        """Locate the CUDA environment on the system
+
+        This functionality should really be brought in from numpy or PyCUDA.
+
+        Returns a dict with keys 'home', 'nvcc', 'include', and 'lib'
+        and values giving the absolute path to each directory.
+
+        Also returns 'cuflags', which allows for customizing compiler flags,
+        these are currently hardcoded to 64-bit CUDA 5 flags
+
+        Starts by looking for the CUDAHOME env variable. If not found, everything
+        is based on finding 'nvcc' in the PATH.
+        """
+
+        # first check if the CUDAHOME env variable is in use
+        if 'CUDAHOME' in os.environ:
+            home = os.environ['CUDAHOME']
+            nvcc = pjoin(home, 'bin', 'nvcc')
+        else:
+            # otherwise, search the PATH for NVCC
+            nvcc = find_in_path('nvcc', os.environ['PATH'])
+            if nvcc is None:
+                raise EnvironmentError('The nvcc binary could not be '
+                    'located in your $PATH. Either add it to your path, or set $CUDAHOME')
+            home = os.path.dirname(os.path.dirname(nvcc))
+
+        cudaconfig = {'home':home, 'nvcc':nvcc,
+                      'include': pjoin(home, 'include'),
+                      'lib': pjoin(home, 'lib')}
+        for k, v in cudaconfig.iteritems():
+            if not os.path.exists(v):
+                raise EnvironmentError('The CUDA %s path could not be located in %s' % (k, v))
+
+        cudaconfig['cuflags'] = '-m64 -gencode arch=compute_10,code=sm_10' + \
+                                ' -gencode arch=compute_20,code=sm_20' + \
+                                ' -gencode arch=compute_30,code=sm_30' + \
+                                ' -gencode arch=compute_35,code=sm_35' 
+
+        return cudaconfig
+
+    CUDA = locate_cuda()
+
+    # tell the compiler it can process .cu
+    self.src_extensions.append('.cu')
+
+    # save references to the default compiler_so and _compile methods
+    default_compiler_so = self.compiler_so
+    super_compile = self._compile
+
+    # now redefine the _compile method. This gets executed for each
+    # object but distutils doesn't have the ability to change compilers
+    # based on source extension: we add it.
+    def _compile(obj, src, ext, cc_args, extra_postargs, pp_opts):
+        postargs = []
+        if True: 
+#        if os.path.splitext(src)[1] == '.cu':
+            # use the cuda compiler for .cu files
+            # currently hard-coded to OS X CUDA 5 options
+            self.set_executable('compiler_so', 
+                                CUDA['nvcc'] + ' -Xcompiler -fPIC ' + CUDA['cuflags'])
+            # set postargs for either '.cu' or '.c'
+            # from the extra_compile_args in the Extension class
+            if '.cu' in extra_postargs:
+                postargs = extra_postargs['.cu']
+        else:
+            if '.c' in extra_postargs:
+                postargs = extra_postargs['.c']
+
+        super_compile(obj, src, ext, cc_args, postargs, pp_opts)
+        # reset the default compiler_so, which we might have changed for cuda
+        self.compiler_so = default_compiler_so
+
+    # inject our redefined _compile method into the class
+    self._compile = _compile
+
+# decorate build_ext
+class cuda_build_ext(build_ext):
+    def build_extensions(self):
+        # this is a bit hacky
+        customize_cython_for_nvcc(self.compiler)
+        build_ext.build_extensions(self)
+
+def find_in_path(name, path):
+    "Find a file in a search path"
+    #adapted by Robert from 
+    # http://code.activestate.com/recipes/52224-find-a-file-given-a-search-path/
+    for dir in path.split(os.pathsep):
+        binpath = pjoin(dir, name)
+        if os.path.exists(binpath):
+            return os.path.abspath(binpath)
+    return None
+
+def check_for_cuda():
+    """Check if CUDA compiler is on the system
+    """
+    # first check if the CUDAHOME env variable is in use
+    if 'CUDAHOME' not in os.environ:
+        nvcc = find_in_path('nvcc', os.environ['PATH'])
+        if nvcc is None:
+            return False
+    print 'detected nvcc or CUDAHOME, installing cudaclaw'
+    return True
+
+found_cuda = check_for_cuda()
+
 if __name__ == '__main__':
+    if found_cuda:
+        patch_numpy_to_use_cython()
+
     setup_package() 
