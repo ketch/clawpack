@@ -142,10 +142,6 @@ def setup_package():
 
     write_version_py()
 
-    if found_cuda:  
-        setup_build_ext = cuda_build_ext
-    else:
-        setup_build_ext = build_ext
 
     setup_dict = dict(
         name = 'clawpack',
@@ -158,7 +154,6 @@ def setup_package():
         license = 'BSD',
         classifiers=[_f for _f in CLASSIFIERS.split('\n') if _f],
         platforms = ["Linux", "Solaris", "Mac OS-X", "Unix"],
-        cmdclass = {'build_ext': setup_build_ext}
         )
 
     try:
@@ -211,13 +206,24 @@ def setup_package():
             if not os.path.exists('clawpack/peanoclaw'):
                 os.symlink(os.path.abspath('pyclaw/src/peanoclaw'),
                            'clawpack/peanoclaw')
-            if not os.path.exists('clawpack/cudaclaw') and found_cuda:
+            if not os.path.exists('clawpack/cudaclaw') and builtins.__USE_CUDACLAW__:
                 os.symlink(os.path.abspath('pyclaw/src/cudaclaw'),
                            'clawpack/cudaclaw')
 
+# build pyclaw/clawpack (numpy buildsystem)
             from numpy.distutils.core import setup
+            builtins.__CYTHON_BUILD__ = False
             setup(configuration=configuration,
                   **setup_dict)
+
+# build cudaclaw if found (cython buildsystem)
+
+            if builtins.__USE_CUDACLAW__:  
+                builtins.__CYTHON_BUILD__ = True
+                cuda_setup_dict = dict(cmdclass = {'build_ext': cuda_build_ext})
+                setup_dict.update(cuda_setup_dict)
+                setup(configuration=configuration,
+                      **setup_dict)
 
     except Exception as err:
         print err
@@ -338,8 +344,8 @@ def customize_cython_for_nvcc(self):
     # based on source extension: we add it.
     def _compile(obj, src, ext, cc_args, extra_postargs, pp_opts):
         postargs = []
-        if True: 
-#        if os.path.splitext(src)[1] == '.cu':
+#        if True: 
+        if os.path.splitext(src)[1] == '.cu':
             # use the cuda compiler for .cu files
             # currently hard-coded to OS X CUDA 5 options
             self.set_executable('compiler_so', 
@@ -388,9 +394,10 @@ def check_for_cuda():
     return True
 
 found_cuda = check_for_cuda()
+builtins.__USE_CUDACLAW__ = found_cuda
 
 if __name__ == '__main__':
-    if found_cuda:
+    if builtins.__USE_CUDACLAW__:
         patch_numpy_to_use_cython()
 
     setup_package() 

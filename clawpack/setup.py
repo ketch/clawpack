@@ -1,26 +1,11 @@
 import os
 from os.path import join as pjoin, dirname
+import sys
 
-def find_in_path(name, path):
-    "Find a file in a search path"
-    #adapted by Robert from 
-    # http://code.activestate.com/recipes/52224-find-a-file-given-a-search-path/
-    for dir in path.split(os.pathsep):
-        binpath = pjoin(dir, name)
-        if os.path.exists(binpath):
-            return os.path.abspath(binpath)
-    return None
-
-def check_for_cuda():
-    """Check if CUDA compiler is on the system
-    """
-    # first check if the CUDAHOME env variable is in use
-    if 'CUDAHOME' not in os.environ:
-        nvcc = find_in_path('nvcc', os.environ['PATH'])
-        if nvcc is None:
-            return False
-    print 'detected nvcc or CUDAHOME, installing cudaclaw'
-    return True
+if sys.version_info[0] < 3:
+    import __builtin__ as builtins
+else:
+    import builtins
 
 def configuration(parent_package='',top_path=None):
     from numpy.distutils.misc_util import Configuration
@@ -31,7 +16,7 @@ def configuration(parent_package='',top_path=None):
     config.add_subpackage('pyclaw')
     config.add_subpackage('petclaw')
 
-    if check_for_cuda():
+    if builtins.__USE_CUDACLAW__ and builtins.__CYTHON_BUILD__:
         config.add_subpackage('cudaclaw')
     return config
 
