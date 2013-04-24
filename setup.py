@@ -11,6 +11,7 @@ import warnings
 import subprocess
 import shutil
 import re
+import traceback
 from Cython.Distutils import build_ext
 from os.path import join as pjoin, dirname
 
@@ -68,6 +69,20 @@ def git_version():
 
     return GIT_REVISION
 
+# better errors from http://stackoverflow.com/users/328031/john-wernicke on
+#  http://stackoverflow.com/a/12539332/122022
+def format_exception(e):
+    exception_list = traceback.format_stack()
+    exception_list = exception_list[:-2]
+    exception_list.extend(traceback.format_tb(sys.exc_info()[2]))
+    exception_list.extend(traceback.format_exception_only(sys.exc_info()[0], sys.exc_info()[1]))
+
+    exception_str = "Traceback (most recent call last):\n"
+    exception_str += "".join(exception_list)
+    # Removing the last \n
+    exception_str = exception_str[:-1]
+
+    return exception_str
 
 # BEFORE importing distutils, remove MANIFEST. distutils doesn't properly
 # update it when the contents of directories change.
@@ -108,7 +123,7 @@ if not release:
                        'git_revision' : GIT_REVISION,
                        'isrelease': str(ISRELEASED)})
     finally:
-        a.close()    
+        a.close()
 
 def configuration(parent_package='',top_path=None):
     from numpy.distutils.misc_util import Configuration
@@ -150,7 +165,7 @@ def setup_package():
         description = DOCLINES[0],
         long_description = "\n".join(DOCLINES[2:]),
         url = "http://www.clawpack.org",
-        download_url = "git+git://github.com/clawpack/clawpack.git#egg=clawpack-dev", 
+        download_url = "git+git://github.com/clawpack/clawpack.git#egg=clawpack-dev",
         license = 'BSD',
         classifiers=[_f for _f in CLASSIFIERS.split('\n') if _f],
         platforms = ["Linux", "Solaris", "Mac OS-X", "Unix"],
@@ -163,7 +178,7 @@ def setup_package():
             setuptools_dict = dict(
                 install_requires = ['numpy >= 1.6',
                                     'matplotlib >= 1.0.1',
-                                    ],                            
+                                    ],
                 extras_require = {'petclaw': ['petsc4py >= 1.2'],
                                   'euler'  : ['scipy >= 0.10.0']},
                 )
@@ -203,9 +218,6 @@ def setup_package():
             if not os.path.exists('clawpack/petclaw'):
                 os.symlink(os.path.abspath('pyclaw/src/petclaw'),
                            'clawpack/petclaw')
-            if not os.path.exists('clawpack/peanoclaw'):
-                os.symlink(os.path.abspath('pyclaw/src/peanoclaw'),
-                           'clawpack/peanoclaw')
             if not os.path.exists('clawpack/cudaclaw') and builtins.__USE_CUDACLAW__:
                 os.symlink(os.path.abspath('pyclaw/src/cudaclaw'),
                            'clawpack/cudaclaw')
@@ -218,7 +230,7 @@ def setup_package():
 
 # build cudaclaw if found (cython buildsystem)
 
-            if builtins.__USE_CUDACLAW__:  
+            if builtins.__USE_CUDACLAW__:
                 builtins.__CYTHON_BUILD__ = True
                 cuda_setup_dict = dict(cmdclass = {'build_ext': cuda_build_ext})
                 setup_dict.update(cuda_setup_dict)
@@ -226,7 +238,7 @@ def setup_package():
                       **setup_dict)
 
     except Exception as err:
-        print err
+        print format_exception(err)
         raise err
     finally:
         if os.path.exists('clawpack/riemann/src'):
@@ -247,9 +259,9 @@ def patch_numpy_to_use_cython():
 
     def generate_a_pyrex_source(self, base, ext_name, source, extension):
         ''' Monkey patch for numpy build_src.build_src method
-    
+
         Uses Cython instead of Pyrex.
-    
+
         Assumes Cython is present
         '''
         if self.inplace:
@@ -272,8 +284,8 @@ def patch_numpy_to_use_cython():
                 raise DistutilsError("%d errors while compiling %r with Cython" \
                       % (cython_result.num_errors, source))
         return target_file
-    
-    
+
+
     from numpy.distutils.command import build_src
     build_src.build_src.generate_a_pyrex_source = generate_a_pyrex_source
 
@@ -285,7 +297,7 @@ def customize_cython_for_nvcc(self):
 
     If you subclass UnixCCompiler, it's not trivial to get your subclass
     injected in, and still have the right customizations (i.e.
-    distutils.sysconfig.customize_compiler) run on it. Instead, we take 
+    distutils.sysconfig.customize_compiler) run on it. Instead, we take
     advantage of Python's dynamism to over-ride the class function directly
     """
 
@@ -326,7 +338,7 @@ def customize_cython_for_nvcc(self):
         cudaconfig['cuflags'] = '-m64 -gencode arch=compute_10,code=sm_10' + \
                                 ' -gencode arch=compute_20,code=sm_20' + \
                                 ' -gencode arch=compute_30,code=sm_30' + \
-                                ' -gencode arch=compute_35,code=sm_35' 
+                                ' -gencode arch=compute_35,code=sm_35'
 
         return cudaconfig
 
@@ -344,11 +356,11 @@ def customize_cython_for_nvcc(self):
     # based on source extension: we add it.
     def _compile(obj, src, ext, cc_args, extra_postargs, pp_opts):
         postargs = []
-#        if True: 
+#        if True:
         if os.path.splitext(src)[1] == '.cu':
             # use the cuda compiler for .cu files
             # currently hard-coded to OS X CUDA 5 options
-            self.set_executable('compiler_so', 
+            self.set_executable('compiler_so',
                                 CUDA['nvcc'] + ' -Xcompiler -fPIC ' + CUDA['cuflags'])
             # set postargs for either '.cu' or '.c'
             # from the extra_compile_args in the Extension class
@@ -374,7 +386,7 @@ class cuda_build_ext(build_ext):
 
 def find_in_path(name, path):
     "Find a file in a search path"
-    #adapted by Robert from 
+    #adapted by Robert from
     # http://code.activestate.com/recipes/52224-find-a-file-given-a-search-path/
     for dir in path.split(os.pathsep):
         binpath = pjoin(dir, name)
@@ -396,8 +408,9 @@ def check_for_cuda():
 found_cuda = check_for_cuda()
 builtins.__USE_CUDACLAW__ = found_cuda
 
+
 if __name__ == '__main__':
     if builtins.__USE_CUDACLAW__:
         patch_numpy_to_use_cython()
 
-    setup_package() 
+    setup_package()
